@@ -11,7 +11,7 @@ instead of the off-the-shelf 0.5 rule saves **$115k** with the *same model* (jus
 cut), and **$287k** versus approving everything. **The threshold is a risk decision, not a
 leaderboard score.**
 
-📄 **[Read the full rendered report](https://rricco.github.io/fraud-cost-optimization/report/report.html)** · 🖱️ **[Launch the live app](https://rafaricco.shinyapps.io/fraud-cost-optimization/)** — an interactive threshold/savings explorer (source in [`app/app.R`](app/app.R))
+📄 **[Read the full rendered report](https://rricco.github.io/fraud-cost-optimization/report/report.html)** — the complete write-up with charts; always on, opens instantly. · 🖱️ **[Launch the live app](https://rafaricco.shinyapps.io/fraud-cost-optimization/)** — interactive threshold/savings explorer (free tier; the first load may take ~15s to wake). Source in [`app/app.R`](app/app.R).
 
 ---
 
