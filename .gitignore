@@ -28,6 +28,9 @@ renv/staging/
 # Run logs (transient).
 *.log
 
+# rsconnect deployment records (account-specific; deploy target, not source).
+rsconnect/
+
 # Secrets — never commit Kaggle credentials.
 kaggle.json
 *.kaggle.json
