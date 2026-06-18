@@ -1,0 +1,371 @@
+---
+title: "Fraud Block Threshold: A Risk Decision, Not an AUC"
+subtitle: "Where to set the block threshold to minimize total cost — fraud loss vs. customer friction"
+format:
+  html:
+    toc: true
+    toc-depth: 2
+    code-fold: true
+    code-summary: "Show code"
+    theme: cosmo
+    fig-width: 8
+    fig-height: 4.2
+bibliography: references.bib
+link-citations: true
+execute:
+  warning: false
+  message: false
+  echo: false
+---
+
+```{r setup}
+library(arrow)
+library(data.table)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(scales)
+library(yardstick)
+
+# Resolve project files whether Quarto renders from the project root or report/.
+proj_path <- function(rel) {
+  for (base in c(".", "..")) {
+    p <- file.path(base, rel)
+    if (file.exists(p)) return(p)
+  }
+  stop("cannot locate ", rel)
+}
+
+source(proj_path(file.path("R", "lib.R")))
+
+# Committed, Kaggle-free artifacts (reproducibility layer 1):
+#   p1_summary.rds — P1 headline tables (raw CSV is gitignored)
+#   scored.parquet — calibrated out-of-sample test scores (the P2 -> P3 bridge)
+p1     <- readRDS(proj_path(file.path("data", "processed", "p1_summary.rds")))
+scored <- read_parquet(proj_path(file.path("data", "processed", "scored.parquet")))
+
+theme_set(theme_minimal(base_size = 13))
+theme_update(
+  panel.grid.minor = element_blank(),
+  plot.title       = element_text(face = "bold", size = 13),
+  legend.position  = "top",
+  legend.title     = element_blank()
+)
+pal <- c(xgboost = "#1f77b4", "Lasso baseline" = "#2ca02c")
+usd <- function(x) dollar(x, accuracy = 1)
+```
+
+This is a payments-fraud problem framed as a **cost decision**, not a leaderboard
+score. A model that ranks fraud well (AUC) still has to answer the operational
+question: *at what probability do we actually block a transaction?* That cutoff
+trades fraud loss against the friction of declining good customers — an asymmetric,
+dollar-denominated choice. The arc below is three questions: **how much is at
+stake (P1)**, **why the threshold is economic (P2)**, and **where to put it (P3)**.
+
+> Data: IEEE-CIS / Vesta card-not-present transactions, ~6 months, USD. `isFraud`
+> is a chargeback-based label. All P2/P3 figures are recomputed live from the
+> committed `scored.parquet`; P1 reads a committed summary of the raw table.
+
+## The figure that matters {#p1}
+
+```{r p1-headline}
+h <- p1$headline
+```
+
+Over the ~6-month window there are **`r comma(h$n_tx)`** transactions worth
+**`r usd(h$total_usd)`**, of which **`r usd(h$fraud_usd)`** is fraud. The number
+that should drive the project is that **`r usd(h$fraud_usd)`** of exposure — not
+the fraud *rate*.
+
+And the rate understates it. Fraud is **`r percent(h$fraud_rate_cnt, 0.01)`** of
+transactions by **count** but **`r percent(h$fraud_rate_usd, 0.01)`** by **dollars**,
+because the average fraudulent ticket (`r usd(h$ticket_fraud)`) runs larger than
+the average legitimate one (`r usd(h$ticket_legit)`). Counting transactions, the
+instinctive default, quietly underweights the problem.
+
+```{r p1-bands, fig.height=3.6}
+bands <- as.data.frame(p1$by_band)
+bands$amt_band <- factor(bands$amt_band, levels = bands$amt_band)
+
+ggplot(bands, aes(amt_band, fraud_usd, fill = fraud_usd_share)) +
+  geom_col(width = 0.7) +
+  geom_text(aes(label = percent(fraud_usd_share, 1)), vjust = -0.4, size = 3.5) +
+  scale_y_continuous(labels = label_dollar(scale = 1e-3, suffix = "k"),
+                     expand = expansion(mult = c(0, 0.12))) +
+  scale_fill_gradient(low = "#cfe3f3", high = "#1f77b4", guide = "none") +
+  labs(title = "Fraud dollars live in the mid-to-high tickets, not the cents",
+       x = "Transaction value band (USD)", y = "Fraud dollars")
+```
+
+The loss is **concentrated in value, not in volume**:
+**`r percent(p1$hi_median, 0.1)`** of fraud dollars come from tickets above the
+median (`r usd(p1$median_amt)`); the \$100–1000 bands alone carry
+`r percent(sum(bands$fraud_usd_share[bands$amt_band %in% c("100-250","250-500","500-1000")]), 1)`
+of it, while sub-\$50 tickets are only
+`r percent(bands$fraud_usd_share[bands$amt_band == "<=50"], 0.1)`. That is hard
+evidence — not aesthetics — that the policy should be **value-weighted**: expected
+loss is PD × exposure.
+
+```{r p1-product}
+prod <- as.data.frame(p1$by_product)
+prod |>
+  transmute(Product = ProductCD,
+            `Transactions` = comma(n_tx),
+            `Fraud rate (count)` = percent(fraud_rate_cnt, 0.1),
+            `Fraud dollars` = usd(fraud_usd),
+            `Share of fraud $` = percent(fraud_usd_share, 0.1)) |>
+  knitr::kable(align = "lrrrr",
+               caption = "Dollars and rate tell different stories, by product.")
+```
+
+Risk is not uniform, and **dollars ≠ rate**. Product **W** is
+`r percent(prod$fraud_usd_share[prod$ProductCD == "W"], 1)` of the fraud dollars on
+a low `r percent(prod$fraud_rate_cnt[prod$ProductCD == "W"], 0.1)` rate (huge
+volume), while product **C** runs a `r percent(prod$fraud_rate_cnt[prod$ProductCD == "C"], 0.1)`
+rate — several times the average — on far less volume. A single off-the-shelf
+"0.5 for everyone" rule is already suboptimal here. That is the hook into P2.
+
+## Why the threshold is an economic decision {#p2}
+
+A classifier **orders** transactions by risk; it does not **choose** where to cut.
+Picking the cut is where the asymmetry enters: a false negative (approve a fraud)
+costs the transaction value; a false positive (block a good customer) costs margin,
+friction, and churn. Those are not the same dollar, so the right cutoff is not 0.5.
+
+The model is the **means**, not the headline. What follows is the discrimination
+it reaches on the untouched test window — a gradient-boosted model against a sparse
+Lasso baseline kept as an interpretable contrast — but the methodology that produces
+an honest, *calibratable* score matters more than the headline AUC.
+
+### Models and tuning
+
+**Validation design — a 4-way temporal split.** Fraud is non-stationary, so a random
+cross-validation fold would train on the future and leak it into the past
+[@kaufman2012leakage]. Instead the ~6 months are cut by time into four contiguous
+windows: **train** (days 1–120) fits the model; **select** (120–135) drives early
+stopping and hyperparameter choice; **calibrate** (135–141) is touched *only* by the
+calibrator and never seen by model selection; **test** (141–183) is the untouched
+final evaluation. Isolating the calibration window is what keeps the probabilities
+honest — no window does double duty.
+
+**xgboost.** Gradient-boosted decision trees [@chen2016xgboost] with native
+categorical handling (high-cardinality factors lumped to the top 100 levels +
+`__other__`, missingness preserved as signal). Tuning is a **random search of 16
+configurations** seeded for reproducibility, each trained with **early stopping
+(40 rounds, ≤ 800 trees)** on the *select* window and scored by **PR-AUC**; the best
+configuration is kept. Crucially, **no class rebalancing** (no `scale_pos_weight`,
+no SMOTE): up-weighting the minority inflates predicted probabilities and breaks the
+calibration the cost layer depends on [@elkan2001foundations]. The search space:
+
+| Hyperparameter | Search space |
+|---|---|
+| `max_depth` | 4, 5, 6, 7, 8 |
+| `eta` (learning rate) | 0.02, 0.03, 0.05, 0.08 |
+| `min_child_weight` | 1, 3, 5, 10 |
+| `reg_lambda` (L2) | 0.5, 1, 2, 5 |
+| `reg_alpha` (L1) | 0, 0.5, 1 |
+| `subsample` | 0.7, 0.8, 0.9 |
+| `colsample_bytree` | 0.6, 0.8, 1.0 |
+
+: Random search draws 16 combinations from this grid; selection by PR-AUC on the *select* window. {tbl-colwidths="[50,50]"}
+
+**Lasso baseline.** An L1-penalized logistic regression [@tibshirani1996lasso] fit
+along the full regularization path by coordinate descent [@friedman2010glmnet]. The
+penalty `lambda` is chosen on the *select* window by **ROC-AUC, not PR-AUC**: at the
+heavily-regularized end of the path the predictions are near-constant, where PR-AUC
+degenerates toward the base rate and would spuriously select the null model, while
+ROC-AUC stays well-behaved. Missingness is handled explicitly (it is signal here):
+numeric features get a train-median imputation **plus a missing-indicator** column;
+categoricals get an explicit `__NA__` level before one-hot encoding — every transform
+learned on *train* only and applied forward. The sparse coefficient vector is the
+point: a readable floor the boosted model must beat.
+
+**Calibration.** A ranking score is necessary but not sufficient — to *sum dollars*
+in P3 the score must read as a probability. The xgboost output is **Platt-scaled**
+[@platt1999probabilistic] on the held-out *calibrate* window, chosen over isotonic
+regression for smoother behavior in the tails of the decision region
+[@niculescu2005predicting]. Discrimination is reported with **both ROC and PR**
+curves, with PR emphasized because it is the more informative view under heavy class
+imbalance [@davis2006relationship; @saito2015precision].
+
+```{r p2-auc}
+ev <- tibble(
+  truth   = factor(scored$label, levels = c("1", "0")),
+  xgboost = scored$pd,
+  `Lasso baseline` = scored$pd_logit
+) |>
+  pivot_longer(c(xgboost, `Lasso baseline`), names_to = "model", values_to = "prob") |>
+  mutate(model = factor(model, levels = c("xgboost", "Lasso baseline")))
+
+aucs <- ev |>
+  group_by(model) |>
+  summarise(`ROC-AUC` = roc_auc_vec(truth, prob),
+            `PR-AUC`  = pr_auc_vec(truth, prob), .groups = "drop")
+base_rate <- mean(scored$label == 1)
+```
+
+```{r p2-curves, fig.width=8, fig.height=5}
+roc <- ev |> group_by(model) |> roc_curve(truth, prob)
+# Drop yardstick's (recall = 0, precision = 1) anchor row (threshold = Inf): it is
+# a convention, not an achievable point, and the segment connecting it to the first
+# real point reads as a spurious "precision plunges from 1 to 0".
+pr  <- ev |> group_by(model) |> pr_curve(truth, prob) |> filter(is.finite(.threshold))
+
+ggplot(roc, aes(1 - specificity, sensitivity, color = model)) +
+  geom_abline(lty = 2, color = "grey60") +
+  geom_path(linewidth = 1) +
+  scale_color_manual(values = pal) +
+  coord_equal() +
+  labs(title = "ROC", x = "False positive rate", y = "True positive rate")
+
+ggplot(pr, aes(recall, precision, color = model)) +
+  geom_hline(yintercept = base_rate, lty = 2, color = "grey60") +
+  geom_path(linewidth = 1) +
+  scale_color_manual(values = pal) +
+  labs(title = "Precision–Recall", x = "Recall", y = "Precision")
+```
+
+```{r p2-auc-table}
+aucs |>
+  mutate(`ROC-AUC` = round(`ROC-AUC`, 3), `PR-AUC` = round(`PR-AUC`, 3)) |>
+  knitr::kable(align = "lrr",
+    caption = sprintf("Test discrimination (out-of-sample). Fraud base rate %.1f%%; a random model's PR-AUC is the base rate.", 100 * base_rate))
+```
+
+Two honesty notes the ROC hides. First, **report PR alongside ROC**: at ~3.4%
+prevalence the false-positive *rate* is diluted by the huge legitimate universe, so
+ROC looks rosy; precision exposes the operational burden (a "good" 5% FPR still means
+tens of thousands of blocked good customers). Second, ranking is necessary but not
+sufficient — to *sum costs* we need the score to mean a probability. So the xgboost
+output is **Platt-calibrated** on the held-out calibration window:
+
+The PR curve also exposes *why* the Lasso baseline is the floor and not the model.
+Its precision is low exactly where confidence is highest (left of the curve): its
+most-confident predictions are a clump of ~1,000 transactions pinned near PD = 1 by a
+few high-magnitude one-hot coefficients (specific device/resolution strings) that
+overfit in training and are only ~5% fraud out-of-sample. xgboost's PR curve is
+monotone and high — the gradient-boosted model does not stake its top scores on
+brittle categorical levels. That gap is what P3 converts into dollars.
+
+```{r p2-reliability, fig.height=3.6}
+reliab <- function(p, y, label, bins = 10) {
+  br <- unique(quantile(p, seq(0, 1, length.out = bins + 1), na.rm = TRUE))
+  tibble(p = p, y = y, bin = cut(p, br, include.lowest = TRUE)) |>
+    group_by(bin) |>
+    summarise(mean_pred = mean(p), obs_rate = mean(y), n = n(), .groups = "drop") |>
+    mutate(method = label)
+}
+rel <- bind_rows(
+  reliab(scored$score, scored$label, "raw xgboost"),
+  reliab(scored$pd,    scored$label, "Platt-calibrated")
+)
+
+ggplot(rel, aes(mean_pred, obs_rate, color = method)) +
+  geom_abline(lty = 2, color = "grey60") +
+  geom_line(linewidth = 0.8) + geom_point(size = 2) +
+  scale_color_manual(values = c("raw xgboost" = "#d62728", "Platt-calibrated" = "#1f77b4")) +
+  scale_x_continuous(labels = percent_format(1)) +
+  scale_y_continuous(labels = percent_format(1)) +
+  labs(title = "Calibration: predicted probability vs. observed fraud rate",
+       x = "Mean predicted PD (decile)", y = "Observed fraud rate")
+```
+
+On the 45° line, a predicted *p* means an observed fraud rate of *p* — which is
+exactly what lets P3 multiply PD by exposure and add dollars across the book.
+
+## Where to put the threshold {#p3}
+
+```{r p3-policy}
+comp  <- cost_components(scored, pred = "pd")
+base  <- optimal_policy(scored, K_BASE, components = comp, pred = "pd")
+ks    <- c(5, 10, 15, 20, 30, 50)
+sens  <- do.call(rbind, lapply(ks, function(k)
+  with(optimal_policy(scored, k, components = comp, pred = "pd"),
+       data.frame(k, threshold, cost, savings_vs_block, savings_vs_approve))))
+fraud_dollars <- sum(scored$amount[scored$label == 1])
+```
+
+The cost model has one free parameter: **k = (fraud cost) / (friction cost)** —
+how many dollars of fraud one wrongly-blocked good customer is worth. The
+false-negative side is measurable (it scales with transaction value); the
+false-positive side comes from the business, so we parameterize it and let
+sensitivity carry the argument. Total expected cost at threshold *t* is
+`fn_dollars(t) + fp_dollars(t) / k`.
+
+On the test window (**`r comma(nrow(scored))`** transactions, **`r percent(base_rate, 0.01)`**
+fraud, **`r usd(fraud_dollars)`** in fraud dollars), the base case **k = `r K_BASE`**
+puts the cost-minimizing block threshold at **`r sprintf("%.3f", base$threshold)`** —
+far below the off-the-shelf 0.5 — for a total cost of **`r usd(base$cost)`**.
+
+```{r p3-cost-curve, fig.height=3.8}
+k <- K_BASE
+cc <- comp; cc$cost <- cc$fn_dollars + cc$fp_dollars / k
+half_cost <- cc$cost[which.min(abs(cc$threshold - 0.5))]
+
+ggplot(cc, aes(threshold, cost)) +
+  geom_line(linewidth = 1, color = "#1f77b4") +
+  annotate("point", x = base$threshold, y = base$cost, color = "#d62728", size = 3) +
+  annotate("point", x = 0.5, y = half_cost, color = "#ff7f0e", size = 3) +
+  annotate("point", x = 1, y = base$cost_approve_all, color = "grey40", size = 3) +
+  annotate("text", x = base$threshold, y = base$cost, vjust = 2,
+           label = sprintf("optimum t = %.3f", base$threshold), color = "#d62728", fontface = 2) +
+  annotate("text", x = 0.5, y = half_cost, vjust = -1.2, label = "0.5 cutoff", color = "#ff7f0e") +
+  annotate("text", x = 1, y = base$cost_approve_all, hjust = 1.1, label = "approve all", color = "grey40") +
+  scale_y_continuous(labels = label_dollar(scale = 1e-3, suffix = "k"),
+                     expand = expansion(mult = c(0.12, 0.05))) +
+  labs(title = sprintf("Total expected cost vs. block threshold (k = %d)", k),
+       x = "Block threshold (PD cutoff)", y = "Total expected cost")
+```
+
+Against the naive baselines, the right threshold saves
+**`r usd(base$savings_vs_block)`** versus the off-the-shelf 0.5 cutoff (same model,
+just the right cut) and **`r usd(base$savings_vs_approve)`** versus approving
+everything. But the headline shouldn't hinge on guessing k — so we sweep it:
+
+```{r p3-sensitivity, fig.width=8, fig.height=5}
+ggplot(sens, aes(k, threshold)) +
+  geom_line(linewidth = 1, color = "#1f77b4") + geom_point(size = 2, color = "#1f77b4") +
+  geom_hline(yintercept = 0.5, lty = 2, color = "grey60") +
+  scale_x_continuous(breaks = ks) +
+  labs(title = "Optimal threshold slides down as fraud gets costlier",
+       x = "k = fraud cost / friction cost", y = "Optimal block threshold")
+
+sens |>
+  select(k, `vs approve-all` = savings_vs_approve, `vs 0.5 cutoff` = savings_vs_block) |>
+  pivot_longer(-k, names_to = "baseline", values_to = "savings") |>
+  ggplot(aes(k, savings, color = baseline)) +
+  geom_line(linewidth = 1) + geom_point(size = 2) +
+  scale_x_continuous(breaks = ks) +
+  scale_y_continuous(labels = label_dollar(scale = 1e-3, suffix = "k")) +
+  scale_color_manual(values = c("vs approve-all" = "grey40", "vs 0.5 cutoff" = "#ff7f0e")) +
+  labs(title = "Savings of the optimal policy, across k",
+       x = "k = fraud cost / friction cost", y = "Savings")
+```
+
+The optimal threshold **responds to the cost ratio** — sliding from
+`r sprintf("%.3f", sens$threshold[sens$k == 5])` at k = 5 down to
+`r sprintf("%.3f", sens$threshold[sens$k == 50])` at k = 50 (block more
+aggressively as fraud hurts more); a policy that ignored k would be a flat line.
+And the conclusion is **robust to the assumption**: the 0.5 cutoff never wins at
+any k, and savings versus approving everything stay between
+`r usd(min(sens$savings_vs_approve))` and `r usd(max(sens$savings_vs_approve))`
+across the whole range. The recommendation does not depend on nailing k exactly.
+
+An interactive version — drag k and watch the threshold and savings move — lives in
+the companion Shiny app.
+
+::: {.callout-warning title="Assumptions & limitations"}
+`isFraud` is a chargeback proxy, not adjudicated truth (friendly fraud, flag
+propagation, right-censoring) — so the fraud cost is an upper bound and there is a
+noise floor on evaluation. The fraud/friction cost ratio *k* is a domain assumption;
+the sensitivity analysis shows how the recommendation holds as *k* varies. All
+figures are on the out-of-sample test window (days 141–183), not monthly run-rate.
+The optimal threshold is selected on the same test window it is scored on; with a
+flat cost basin and one degree of freedom over ~118k rows the resulting optimism is
+negligible, and the savings-versus-baseline comparisons are unaffected.
+:::
+
+## References
+
+::: {#refs}
+:::
