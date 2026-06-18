@@ -1,0 +1,33 @@
+# RStudio / R session cruft
+.Rproj.user
+.Rhistory
+.RData
+.Ruserdata
+
+# Raw data — never commit the Kaggle CSVs (~1.3 GB); reproducible via python/fetch_data.py.
+data/raw/
+
+# Of data/processed/, commit ONLY the light artifacts (the Kaggle-free reproducibility layer):
+#   scored.parquet  — calibrated test scores (P2 -> P3 bridge)
+#   p1_summary.rds  — P1 headline tables
+# Heavier intermediates (model_input.parquet) stay local.
+data/processed/*
+!data/processed/.gitkeep
+!data/processed/scored.parquet
+!data/processed/p1_summary.rds
+
+# renv library is restored from renv.lock; do not commit it.
+renv/library/
+renv/local/
+renv/cellar/
+renv/lock/
+renv/python/
+renv/sandbox/
+renv/staging/
+
+# Run logs (transient).
+*.log
+
+# Secrets — never commit Kaggle credentials.
+kaggle.json
+*.kaggle.json
