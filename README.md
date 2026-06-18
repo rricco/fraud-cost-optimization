@@ -11,7 +11,7 @@ instead of the off-the-shelf 0.5 rule saves **$115k** with the *same model* (jus
 cut), and **$287k** versus approving everything. **The threshold is a risk decision, not a
 leaderboard score.**
 
-📄 **[Read the full rendered report](https://rricco.github.io/fraud-cost-optimization/report/report.html)** · 🖱️ Interactive threshold/savings explorer in [`app/app.R`](app/app.R) (run locally with `shiny::runApp("app")`)
+📄 **[Read the full rendered report](https://rricco.github.io/fraud-cost-optimization/report/report.html)** · 🖱️ **[Launch the live app](https://rafaricco.shinyapps.io/fraud-cost-optimization/)** — an interactive threshold/savings explorer (source in [`app/app.R`](app/app.R))
 
 ---
 
