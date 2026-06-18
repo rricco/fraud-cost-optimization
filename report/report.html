@@ -2,16 +2,13 @@
 <html xmlns="http://www.w3.org/1999/xhtml" lang="en" xml:lang="en"><head>
 
 <meta charset="utf-8">
-<meta name="generator" content="quarto-1.9.37">
+<meta name="generator" content="quarto-1.8.25">
 
 <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes">
 
 
 <title>Fraud Block Threshold: A Risk Decision, Not an AUC</title>
 <style>
-/* Default styles provided by pandoc.
-** See https://pandoc.org/MANUAL.html#variables-for-html for config info.
-*/
 code{white-space: pre-wrap;}
 span.smallcaps{font-variant: small-caps;}
 div.columns{display: flex; gap: min(4vw, 1.5em);}
@@ -27,6 +24,7 @@ ul.task-list li input[type="checkbox"] {
 div.csl-bib-body { }
 div.csl-entry {
   clear: both;
+  margin-bottom: 0em;
 }
 .hanging-indent div.csl-entry {
   margin-left:2em;
@@ -48,14 +46,15 @@ div.csl-indent {
 <script src="report_files/libs/clipboard/clipboard.min.js"></script>
 <script src="report_files/libs/quarto-html/quarto.js" type="module"></script>
 <script src="report_files/libs/quarto-html/tabsets/tabsets.js" type="module"></script>
+<script src="report_files/libs/quarto-html/axe/axe-check.js" type="module"></script>
 <script src="report_files/libs/quarto-html/popper.min.js"></script>
 <script src="report_files/libs/quarto-html/tippy.umd.min.js"></script>
 <script src="report_files/libs/quarto-html/anchor.min.js"></script>
 <link href="report_files/libs/quarto-html/tippy.css" rel="stylesheet">
-<link href="report_files/libs/quarto-html/quarto-syntax-highlighting-7f8f88aac4f3542376d5c11b86a4c14d.css" rel="stylesheet" id="quarto-text-highlighting-styles">
+<link href="report_files/libs/quarto-html/quarto-syntax-highlighting-7b89279ff1a6dce999919e0e67d4d9ec.css" rel="stylesheet" id="quarto-text-highlighting-styles">
 <script src="report_files/libs/bootstrap/bootstrap.min.js"></script>
 <link href="report_files/libs/bootstrap/bootstrap-icons.css" rel="stylesheet">
-<link href="report_files/libs/bootstrap/bootstrap-67270d1595a62d14f123c043d4fb2f18.min.css" rel="stylesheet" append-hash="true" id="quarto-bootstrap" data-mode="light">
+<link href="report_files/libs/bootstrap/bootstrap-4d7f0bce1131f3e5f9547cd857cfbfc8.min.css" rel="stylesheet" append-hash="true" id="quarto-bootstrap" data-mode="light">
 
 
 </head>
@@ -228,7 +227,8 @@ div.csl-indent {
 </tr>
 </tbody>
 </table>
-<p><strong>Lasso baseline.</strong> An L1-penalized logistic regression <span class="citation" data-cites="tibshirani1996lasso">(<a href="#ref-tibshirani1996lasso" role="doc-biblioref">Tibshirani 1996</a>)</span> fit along the full regularization path by coordinate descent <span class="citation" data-cites="friedman2010glmnet">(<a href="#ref-friedman2010glmnet" role="doc-biblioref">Friedman et al. 2010</a>)</span>. The penalty <code>lambda</code> is chosen on the <em>select</em> window by <strong>ROC-AUC, not PR-AUC</strong>: at the heavily-regularized end of the path the predictions are near-constant, where PR-AUC degenerates toward the base rate and would spuriously select the null model, while ROC-AUC stays well-behaved. Missingness is handled explicitly (it is signal here): numeric features get a train-median imputation <strong>plus a missing-indicator</strong> column; categoricals get an explicit <code>__NA__</code> level before one-hot encoding — every transform learned on <em>train</em> only and applied forward. The sparse coefficient vector is the point: a readable floor the boosted model must beat.</p>
+<p><strong>Lasso baseline.</strong> An L1-penalized logistic regression <span class="citation" data-cites="tibshirani1996lasso">(<a href="#ref-tibshirani1996lasso" role="doc-biblioref">Tibshirani 1996</a>)</span> fit along the full regularization path by coordinate descent <span class="citation" data-cites="friedman2010glmnet">(<a href="#ref-friedman2010glmnet" role="doc-biblioref">Friedman, Hastie, and Tibshirani 2010</a>)</span>. The penalty <code>lambda</code> is chosen on the <em>select</em> window by <strong>ROC-AUC, not PR-AUC</strong>: at the heavily-regularized end of the path the predictions are near-constant, where PR-AUC degenerates toward the base rate and would spuriously select the null model, while ROC-AUC stays well-behaved. Missingness is handled explicitly (it is signal here): numeric features get a train-median imputation <strong>plus a missing-indicator</strong> column; categoricals get an explicit <code>__NA__</code> level before one-hot encoding — every transform learned on <em>train</em> only and applied forward. The sparse coefficient vector is the point: a readable floor the boosted model must beat.</p>
+<p>A third honesty note belongs here: picking <code>lambda</code> by <code>argmax</code> of the <em>select</em> ROC-AUC is the weakest link in this baseline. Because <em>select</em> (days 120–135) sits right after <em>train</em>, its AUC keeps climbing as the penalty falls — the maximum is pinned to the low-<code>lambda</code> boundary of the path rather than a genuine interior optimum. But <em>select</em> and <em>test</em> (days 141–183, further into the future) disagree: the lighter-penalty fit that wins <em>select</em> generalizes slightly <em>worse</em> out-of-sample than a more-regularized one — a textbook signature of temporal overfit. A <strong>one-standard-error (parsimony) rule</strong> <span class="citation" data-cites="hastie2009elements">(<a href="#ref-hastie2009elements" role="doc-biblioref">Hastie, Tibshirani, and Friedman 2009</a>)</span>, or scoring the path across <strong>several sequential validation windows</strong> instead of one, would pull the choice toward the sparser, more robust end and is the more defensible design. The effect is small here (a few thousandths of test ROC/PR on a model that is deliberately the floor, not the headline), so the committed run is kept as-is; the more careful selection rule is noted as the obvious next refinement.</p>
 <p><strong>Calibration.</strong> A ranking score is necessary but not sufficient — to <em>sum dollars</em> in P3 the score must read as a probability. The xgboost output is <strong>Platt-scaled</strong> <span class="citation" data-cites="platt1999probabilistic">(<a href="#ref-platt1999probabilistic" role="doc-biblioref">Platt 1999</a>)</span> on the held-out <em>calibrate</em> window, chosen over isotonic regression for smoother behavior in the tails of the decision region <span class="citation" data-cites="niculescu2005predicting">(<a href="#ref-niculescu2005predicting" role="doc-biblioref">Niculescu-Mizil and Caruana 2005</a>)</span>. Discrimination is reported with <strong>both ROC and PR</strong> curves, with PR emphasized because it is the more informative view under heavy class imbalance <span class="citation" data-cites="davis2006relationship saito2015precision">(<a href="#ref-davis2006relationship" role="doc-biblioref">Davis and Goadrich 2006</a>; <a href="#ref-saito2015precision" role="doc-biblioref">Saito and Rehmsmeier 2015</a>)</span>.</p>
 <div class="cell">
 <div class="cell-output-display">
@@ -334,27 +334,30 @@ div.csl-indent {
 </section>
 <section id="references" class="level2">
 <h2 class="anchored" data-anchor-id="references">References</h2>
-<div id="refs" class="references csl-bib-body hanging-indent" role="list">
+<div id="refs" class="references csl-bib-body hanging-indent" data-entry-spacing="0" role="list">
 <div id="ref-chen2016xgboost" class="csl-entry" role="listitem">
-Chen, Tianqi, and Carlos Guestrin. 2016. <span>“<span>XGBoost</span>: A Scalable Tree Boosting System.”</span> <em>Proceedings of the 22nd ACM SIGKDD International Conference on Knowledge Discovery and Data Mining (KDD)</em>, 785–94. <a href="https://doi.org/10.1145/2939672.2939785">https://doi.org/10.1145/2939672.2939785</a>.
+Chen, Tianqi, and Carlos Guestrin. 2016. <span>“<span>XGBoost</span>: A Scalable Tree Boosting System.”</span> In <em>Proceedings of the 22nd ACM SIGKDD International Conference on Knowledge Discovery and Data Mining (KDD)</em>, 785–94. <a href="https://doi.org/10.1145/2939672.2939785">https://doi.org/10.1145/2939672.2939785</a>.
 </div>
 <div id="ref-davis2006relationship" class="csl-entry" role="listitem">
-Davis, Jesse, and Mark Goadrich. 2006. <span>“The Relationship Between Precision-Recall and <span>ROC</span> Curves.”</span> <em>Proceedings of the 23rd International Conference on Machine Learning (ICML)</em>, 233–40. <a href="https://doi.org/10.1145/1143844.1143874">https://doi.org/10.1145/1143844.1143874</a>.
+Davis, Jesse, and Mark Goadrich. 2006. <span>“The Relationship Between Precision-Recall and <span>ROC</span> Curves.”</span> In <em>Proceedings of the 23rd International Conference on Machine Learning (ICML)</em>, 233–40. <a href="https://doi.org/10.1145/1143844.1143874">https://doi.org/10.1145/1143844.1143874</a>.
 </div>
 <div id="ref-elkan2001foundations" class="csl-entry" role="listitem">
-Elkan, Charles. 2001. <span>“The Foundations of Cost-Sensitive Learning.”</span> <em>Proceedings of the 17th International Joint Conference on Artificial Intelligence (IJCAI)</em>, 973–78.
+Elkan, Charles. 2001. <span>“The Foundations of Cost-Sensitive Learning.”</span> In <em>Proceedings of the 17th International Joint Conference on Artificial Intelligence (IJCAI)</em>, 973–78.
 </div>
 <div id="ref-friedman2010glmnet" class="csl-entry" role="listitem">
 Friedman, Jerome, Trevor Hastie, and Robert Tibshirani. 2010. <span>“Regularization Paths for Generalized Linear Models via Coordinate Descent.”</span> <em>Journal of Statistical Software</em> 33 (1): 1–22. <a href="https://doi.org/10.18637/jss.v033.i01">https://doi.org/10.18637/jss.v033.i01</a>.
+</div>
+<div id="ref-hastie2009elements" class="csl-entry" role="listitem">
+Hastie, Trevor, Robert Tibshirani, and Jerome Friedman. 2009. <em>The Elements of Statistical Learning: Data Mining, Inference, and Prediction</em>. 2nd ed. Springer Series in Statistics. Springer. <a href="https://doi.org/10.1007/978-0-387-84858-7">https://doi.org/10.1007/978-0-387-84858-7</a>.
 </div>
 <div id="ref-kaufman2012leakage" class="csl-entry" role="listitem">
 Kaufman, Shachar, Saharon Rosset, Claudia Perlich, and Ori Stitelman. 2012. <span>“Leakage in Data Mining: Formulation, Detection, and Avoidance.”</span> <em>ACM Transactions on Knowledge Discovery from Data (TKDD)</em> 6 (4): 1–21. <a href="https://doi.org/10.1145/2382577.2382579">https://doi.org/10.1145/2382577.2382579</a>.
 </div>
 <div id="ref-niculescu2005predicting" class="csl-entry" role="listitem">
-Niculescu-Mizil, Alexandru, and Rich Caruana. 2005. <span>“Predicting Good Probabilities with Supervised Learning.”</span> <em>Proceedings of the 22nd International Conference on Machine Learning (ICML)</em>, 625–32. <a href="https://doi.org/10.1145/1102351.1102430">https://doi.org/10.1145/1102351.1102430</a>.
+Niculescu-Mizil, Alexandru, and Rich Caruana. 2005. <span>“Predicting Good Probabilities with Supervised Learning.”</span> In <em>Proceedings of the 22nd International Conference on Machine Learning (ICML)</em>, 625–32. <a href="https://doi.org/10.1145/1102351.1102430">https://doi.org/10.1145/1102351.1102430</a>.
 </div>
 <div id="ref-platt1999probabilistic" class="csl-entry" role="listitem">
-Platt, John. 1999. <span>“Probabilistic Outputs for Support Vector Machines and Comparisons to Regularized Likelihood Methods.”</span> In <em>Advances in Large Margin Classifiers</em>, edited by Alexander J. Smola, Peter Bartlett, Bernhard Schölkopf, and Dale Schuurmans. MIT Press.
+Platt, John. 1999. <span>“Probabilistic Outputs for Support Vector Machines and Comparisons to Regularized Likelihood Methods.”</span> In <em>Advances in Large Margin Classifiers</em>, edited by Alexander J. Smola, Peter Bartlett, Bernhard Schölkopf, and Dale Schuurmans, 61–74. MIT Press.
 </div>
 <div id="ref-saito2015precision" class="csl-entry" role="listitem">
 Saito, Takaya, and Marc Rehmsmeier. 2015. <span>“The Precision-Recall Plot Is More Informative Than the <span>ROC</span> Plot When Evaluating Binary Classifiers on Imbalanced Datasets.”</span> <em>PLOS ONE</em> 10 (3): e0118432. <a href="https://doi.org/10.1371/journal.pone.0118432">https://doi.org/10.1371/journal.pone.0118432</a>.

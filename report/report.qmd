@@ -180,6 +180,20 @@ categoricals get an explicit `__NA__` level before one-hot encoding — every tr
 learned on *train* only and applied forward. The sparse coefficient vector is the
 point: a readable floor the boosted model must beat.
 
+A third honesty note belongs here: picking `lambda` by `argmax` of the *select*
+ROC-AUC is the weakest link in this baseline. Because *select* (days 120–135) sits
+right after *train*, its AUC keeps climbing as the penalty falls — the maximum is
+pinned to the low-`lambda` boundary of the path rather than a genuine interior
+optimum. But *select* and *test* (days 141–183, further into the future) disagree:
+the lighter-penalty fit that wins *select* generalizes slightly *worse* out-of-sample
+than a more-regularized one — a textbook signature of temporal overfit. A **one-standard-error
+(parsimony) rule** [@hastie2009elements], or scoring the path across **several
+sequential validation windows** instead of one, would pull the choice toward the
+sparser, more robust end and is the more defensible design. The effect is small here
+(a few thousandths of test ROC/PR on a model that is deliberately the floor, not the
+headline), so the committed run is kept as-is; the more careful selection rule is
+noted as the obvious next refinement.
+
 **Calibration.** A ranking score is necessary but not sufficient — to *sum dollars*
 in P3 the score must read as a probability. The xgboost output is **Platt-scaled**
 [@platt1999probabilistic] on the held-out *calibrate* window, chosen over isotonic
